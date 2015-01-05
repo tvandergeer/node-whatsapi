@@ -626,7 +626,7 @@ Writer.prototype.writeJid = function(user, server) {
 };
 
 Writer.prototype.writeBytes = function(bytes) {
-	var len = bytes.length;
+	var len = new Buffer(bytes).length;
 
 	if(len >= 0x100) {
 		this.writeInt8(0xFD);
@@ -731,9 +731,9 @@ Writer.prototype.getAttributesBufferLength = function(attributes) {
 };
 
 Writer.prototype.getRawBufferLength = function(raw) {
-	var size = raw.length + 2;
-
-	return raw.length >= 0x100 ? size + 2 : size;
+	var buf = new Buffer(raw).length;
+    	
+	return buf >= 0x100 ? buf + 4 : buf + 2;
 };
 
 exports.Buffer = Buffer;
