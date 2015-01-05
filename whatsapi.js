@@ -125,10 +125,6 @@ WhatsApi.prototype.sendIsOnline = function() {
 };
 
 WhatsApi.prototype.sendIsOffline = function() {
-	this.sendOfflineStatus();
-};
-
-WhatsApi.prototype.sendOfflineStatus = function() {
 	var attributes = {
 		type : 'unavailable',
 		name : this.config.username
@@ -307,14 +303,6 @@ WhatsApi.prototype.sendPresenceUnsubscription = function(who) {
 	this.sendNode(node);
 };
 
-WhatsApi.prototype.requestContactsSync = function(msisdnList) {
-	if(!this.contactsSync) {
-		this.initContactsSync();
-	}
-
-	this.contactsSync.requestSync(msisdnList);
-};
-
 WhatsApi.prototype.setProfilePicture = function(filepath) {
 //See this discussion when moving to WAUTH-2: https://github.com/tgalal/yowsup/issues/296
 //The xmlns needs to be moved to the parent node and the order of thumb and fullsize picture is reversed
@@ -374,20 +362,35 @@ WhatsApi.prototype.requestProfilePicture = function(target, small) {
 	this.sendNode(new protocol.Node('iq', attributes, [pictureNode]));
 };
 
-WhatsApi.prototype.initContactsSync = function() {
-	this.contactsSync = createContactsSync(this.config);
+//Ported from WhatsAPI-PHP. This functionality works but am unable to get the result[failed and sync numbers]
+WhatsApi.prototype.requestSync = function(msisdnList) {
 
-	this.contactsSync.on('contacts.error', function(e) {
-		this.emit('contacts.error', e);
-	}.bind(this));
+	var contacts = [];
+	for (var number in msisdnList){
+		var contact = new protocol.Node('user', null, null, ('+' + msisdnList[number]));
+		contacts.push(contact);
+	}
+	
+	var attributes = {
+		to    : this.selfAddress,
+		type  : 'get',
+		id    : this.nextMessageId('sendsync_'),
+		xmlns : 'urn:xmpp:whatsapp:sync'
+	};
 
-	this.contactsSync.on('error', function(e) {
-		this.emit('contacts.error', e);
-	}.bind(this));
+	var attr = {
+	mode    : 'full',
+        context : 'interactive',
+        sid     : ''+((common.tstamp().toString() + 11644477200) * 10000000),
+        index   : ''+0,
+        last    : 'true'
+	};
 
-	this.contactsSync.on('sync', function(list) {
-		this.emit('contacts.sync', list);
-	}.bind(this));
+	var syncnode = new protocol.Node('sync', attr, contacts);
+
+	var messageNode = new protocol.Node('iq', attributes, [syncnode]);
+	
+	this.sendNode(messageNode);
 };
 
 WhatsApi.prototype.sendMessageNode = function(to, node, msgid) {
@@ -534,7 +537,11 @@ WhatsApi.prototype.processNode = function(node) {
 		};
 		this.emit('group.created', group);
 	}
-
+	
+	if(node.isSync()) {
+		this.emit('sync', node.attribute('index'), node.attribute('sync'), node.child('in'), node.child('out'));
+	}
+	
 	if(node.isLastSeen()) {
 		var tstamp = Date.now() - (+node.child('query').attribute('seconds')) * 1000;
 		this.emit('lastseen.found', node.attribute('from'), new Date(tstamp));
@@ -1054,204 +1061,6 @@ WhatsApiDebug.prototype.processNode = function(node) {
 WhatsApiDebug.prototype.sendNode = function(node) {
 	node && console.log(node.toXml('tx '));
 	return WhatsApiDebug.super_.prototype.sendNode.apply(this, arguments);
-};
-
-function WhatsApiContactsSync(config) {
-	this.config = common.extend({}, this.defaultConfig, config);
-
-	events.EventEmitter.call(this);
-}
-
-util.inherits(WhatsApiContactsSync, events.EventEmitter);
-
-WhatsApiContactsSync.prototype.defaultConfig = {
-	msisdn   : '',
-	password : '',
-	server   : 's.whatsapp.net'
-};
-
-WhatsApiContactsSync.prototype.requestSync = function(msisdnList) {
-	if(!util.isArray(msisdnList)) {
-		this.emit('contacts.error', 'Contacts list should be an array');
-		return;
-	}
-
-	var options = {
-		hostname : 'sro.whatsapp.net',
-		path     : '/v2/sync/a',
-		method   : 'POST',
-		headers  : this.createHeaders()
-	};
-
-	this.request(options, function(err, jsonbody, headers) {
-		try {
-			if(err) {
-				throw err;
-			}
-
-			try {
-				var body = JSON.parse(jsonbody);
-			} catch(e) {
-				throw 'Received non-json respose: ' + jsonbody;
-			}
-
-			if(body.message !== 'next token') {
-				throw 'Received invalid json respose: ' + jsonbody;
-			}
-
-			var authHeader = headers['www-authenticate'];
-
-			if(!authHeader) {
-				throw 'No auth header found';
-			}
-
-			var authParams = {};
-
-			authHeader.replace(/(?:\s|,)([^=]+)="([^"]+)"/g, function(_u, a, b) {
-				authParams[a] = b;
-			});
-
-			if(!authParams.nonce) {
-				throw 'Nonce not found in ' + authHeader;
-			}
-
-			var authOptions = options;
-
-			var escape = querystring.escape;
-
-			querystring.escape = function(value) {
-				return value.toString().match(/^\+/) ? escape.apply(querystring, arguments) : value;
-			};
-
-			var postString = querystring.stringify({
-				ut    : 'wa',
-				t     : 'c',
-				'u[]' : msisdnList.map(function(msisdn) {
-					return msisdn.toString().replace(/^(\d)/, '+$1')
-				})
-			});
-
-			querystring.escape = escape;
-
-			authOptions.path    = '/v2/sync/q';
-			authOptions.headers = this.createHeaders(authParams.nonce, postString.length);
-
-			this.request(authOptions, postString, function(err, jsonbody) {
-				try {
-					var response = JSON.parse(jsonbody);
-				} catch(e) {
-					this.emit('error', 'Received non-json respose: ' + jsonbody);
-					return;
-				}
-
-				var contacts = response.c.map(function(item) {
-					return {
-						msisdn   : item.n,
-						status   : item.s,
-						whatsapp : item.w
-					};
-				});
-
-				this.emit('sync', contacts);
-			}.bind(this));
-		} catch(e) {
-			this.emit('error', e);
-		}
-	}.bind(this));
-};
-
-WhatsApiContactsSync.prototype.createHeaders = function(nonce, contentLen) {
-	contentLen = contentLen || 0;
-
-	return {
-		'User-Agent'      : this.config.ua,
-		'Accept'          : 'text/json',
-		'Content-Type'    : 'application/x-www-form-urlencoded',
-		'Authorization'   : this.createAuth(nonce),
-		'Accept-Encoding' : 'identity',
-		'Content-Length'  : contentLen.toString()
-	};
-};
-
-WhatsApiContactsSync.prototype.createAuth = function(nonce) {
-	var credentials = Buffer.concat([
-		new Buffer(this.config.msisdn),
-		new Buffer(':' + this.config.server + ':'),
-		new Buffer(this.config.password, 'base64')
-	]);
-
-	var salt = crypto.randomBytes(5).toString('hex');
-
-	var md5 = function(buf) {
-		var hash = crypto.createHash('md5');
-		hash.update(buf);
-		return hash.digest();
-	};
-
-	nonce = nonce || '0';
-
-	var credentialsHash = md5(credentials);
-
-	var saltedCredentialsHash = md5(Buffer.concat([
-		credentialsHash,
-		new Buffer(':' + nonce + ':' + salt)
-	]));
-
-	var digestHash = md5('AUTHENTICATE:WAWA/s.whatsapp.net');
-
-	var responseHash = md5(
-		saltedCredentialsHash.toString('hex') +
-		':' + nonce + ':00000001:' + salt + ':auth:' +
-		digestHash.toString('hex')
-	);
-
-	var authParams = {
-		username     : this.config.msisdn,
-		realm        : this.config.server,
-		nonce        : nonce,
-		cnonce       : salt,
-		nc           : '00000001',
-		qop          : 'auth',
-		'digest-uri' : 'WAWA/s.whatsapp.net',
-		response     : responseHash.toString('hex'),
-		charset      : 'utf-8'
-	};
-
-	var authArray = [];
-
-	for(var param in authParams) {
-		if(authParams.hasOwnProperty(param)) {
-			authArray.push(util.format('%s="%s"', param, authParams[param]));
-		}
-	}
-
-	return 'X-WAWA:' + authArray.join(',');
-};
-
-WhatsApiContactsSync.prototype.request = function(options, post, callback) {
-	var req = https.request(options, function(res) {
-		var buffers = [];
-
-		res.on('data', function(buf) {
-			buffers.push(buf);
-		});
-
-		res.on('end', function() {
-			callback(false, Buffer.concat(buffers).toString(), res.headers);
-		});
-	});
-
-	if(post instanceof Function) {
-		callback = post;
-	} else {
-		req.write(post);
-	}
-
-	req.on('error', function(e) {
-		callback(e);
-	});
-
-	req.end();
 };
 
 function WhatsApiRegistration(config) {
