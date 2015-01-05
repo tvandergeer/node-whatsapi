@@ -193,6 +193,10 @@ Node.prototype.isGroupOutcomer = function() {
 	return this.tag() === 'presence' && this.attribute('xmlns') === 'w' && this.attribute('remove');
 };
 
+Node.prototype.isSync = function() {
+	return this.tag() === 'iq' && this.child('sync');
+};
+
 Node.prototype.isLastSeen = function() {
 	return this.child('query') && this.child('query').attribute('xmlns') === 'jabber:iq:last';
 };
